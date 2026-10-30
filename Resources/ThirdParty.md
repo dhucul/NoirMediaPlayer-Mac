@@ -16,3 +16,15 @@ Contents/Resources/VLC. Re-sign an edited local app using codesign --force --dee
 
 The NOIR icon and design come from the Windows application, dhucul/NoirMediaPlayer.
 The macOS application uses Apple's AppKit, AVFoundation, CoreMedia and QuartzCore frameworks.
+
+The AACS runtime is built from unmodified upstream sources for arm64 macOS 13:
+
+- VideoLAN libaacs 0.12.0: https://download.videolan.org/pub/videolan/libaacs/0.12.0/libaacs-0.12.0.tar.bz2
+- GNU libgcrypt 1.12.4: https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.12.4.tar.bz2
+- GNU libgpg-error 1.61: https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.61.tar.bz2
+
+Pinned source hashes and reproducible build commands are in Scripts/fetch-aacs.sh.
+The replaceable dynamic libraries are in Contents/Frameworks/AACS; their license
+texts are in Contents/Resources/Licenses/AACS. The library portions use LGPL 2.1
+or later; bundled COPYING files also describe upstream tools' GPL terms. No keys
+or certificates are bundled. libaacs does not provide BD+ or UHD AACS 2.x support.

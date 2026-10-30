@@ -1,32 +1,32 @@
-NOIR Media Player for macOS — Apple Silicon preview, build 3
+NOIR Media Player for macOS — Apple Silicon preview, build 5
 
 Drag NOIR Media Player into Applications, then open it.
 Requires an Apple Silicon Mac (M1 or later); the deployment target is macOS 13.
 
-Native macOS playback is preferred. VLC is bundled for unsupported formats,
-complex captions, DVD and Blu-ray compatibility. No separate VLC install is needed.
+AVFoundation provides native playback. VLC and the Apple Silicon AACS runtime
+are bundled for compatibility, DVD and Blu-ray playback. No separate VLC
+installation is needed. Protected Blu-rays require suitable keys: open Settings
+and choose Download AACS keys, or install a compatible KEYDB.cfg in the key
+folder. Keys are not included in this installer. Library overrides require a
+restart; installing or updating keys does not. Press Play to retry a failed source.
 
-This preview is ad-hoc signed and is not Apple-notarized.
-Physical-disc behavior and older macOS versions still need verification.
-Encrypted Blu-ray needs a compatible arm64 AACS library and suitable keys;
-these are configured through Quick Settings and are not included here.
+Use Eject Disc in NOIR or Command-E to release playback and eject the disc.
+Disc menus accept mouse clicks, Option-arrow navigation and Return to activate.
 
 Open media: Command-O. Open folder: Shift-Command-O.
 Network stream: Command-L. Disc: Command-D. Eject: Command-E.
 Space: play/pause. F: fullscreen. P: mini player. S: snapshot.
-I: inspector. B: queue. Option-arrows/Return: DVD menu navigation.
+I: inspector. B: queue.
 
-Source, build scripts, tests and detailed parity notes are in the repository
-below (see README.md). The reports record 82 passing
-playback/behavior checks and 3 runtime packaging checks.
+Build 5 fixes retry after AACS setup, partitioned-disc release, key-only AACS
+configuration validation, and normal end-of-file handling when UI polling is
+delayed. It retains build 4's Blu-ray runtime and disc-menu mouse support.
+Regression tests use synthetic media and mock eject adapters. The prior build
+was also checked with a physical Blu-ray; a broader drive/disc matrix and older
+macOS versions still need testing. BD-J menus may require Java; BD+ and UHD
+AACS 2.x protection are not provided by the bundled AACS runtime.
 
-Build 3 keeps audio and position when rotating during compatibility startup,
-resumes playback when seeking after a file ends, keeps seeks made while a file
-opens, makes Play after Stop resume the current item and Next after removing it
-play the following one, keeps tracks that share a name, and preserves settings
-across versions. It also reads Windows-1252 and BOM playlists, fixes caption
-parsing edge cases, keeps caption files dropped with media out of the queue,
-and hardens the VLC adapter against a missing player.
-
-Source: https://github.com/dhucul/NoirMediaPlayer-Mac
+This preview is ad-hoc signed and is not Apple-notarized.
+Source, build instructions, test coverage and runtime licenses:
+https://github.com/dhucul/NoirMediaPlayer-Mac
 Windows version: https://github.com/dhucul/NoirMediaPlayer

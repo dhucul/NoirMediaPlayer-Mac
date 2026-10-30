@@ -1,7 +1,51 @@
 import Foundation
+import Darwin
+
+enum AacsRuntime {
+    private(set) static var libraryPath: String?
+    private(set) static var status = "AACS library unavailable"
+    // Keep the validated image mapped for libbluray's later dlopen.
+    private static var handle: UnsafeMutableRawPointer?
+    static func initialize(configured: String) {
+        setenv("AACS_CONFIG_DIR",AacsKeys.folder.path,1)
+        // Upstream macOS libaacs uses AACS_HOME as the parent of its aacs folder.
+        setenv("AACS_HOME",AacsKeys.folder.deletingLastPathComponent().path,1)
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/AACS/libaacs.dylib").path
+        var errors: [String] = []
+        for path in [configured,bundled,"/opt/homebrew/lib/libaacs.dylib","/usr/local/lib/libaacs.dylib"] where !path.isEmpty {
+            guard FileManager.default.fileExists(atPath:path) else { continue }
+            guard let loaded = dlopen(path,RTLD_NOW | RTLD_LOCAL) else {
+                errors.append(dlerror().map { String(cString:$0) } ?? "Library could not load"); continue
+            }
+            guard dlsym(loaded,"aacs_open") != nil,dlsym(loaded,"aacs_close") != nil else { dlclose(loaded); errors.append("The selected library has no AACS entry points."); continue }
+            handle = loaded; libraryPath = path
+            // libbluray's macOS loader appends .dylib, unlike the Windows DLL
+            // loader. Passing the full filename makes it try .dylib.dylib.
+            setenv("LIBAACS_PATH",URL(fileURLWithPath:path).deletingPathExtension().path,1)
+            status = path == bundled ? "Bundled AACS runtime ready" : "External AACS runtime ready"; return
+        }
+        status = errors.isEmpty ? "AACS library unavailable" : "AACS library could not load"
+        errors.forEach { NSLog("NOIR AACS: %@",$0) }
+    }
+}
 
 enum AacsKeys {
-    static var folder: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/aacs") }
+    static var folder: URL {
+        if ProcessInfo.processInfo.environment["NOIR_DATA_DIR"] != nil { return Preferences.directory.appendingPathComponent("aacs") }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/aacs")
+    }
+    static func validateInstalled(in directory: URL? = nil) throws {
+        let url = (directory ?? folder).appendingPathComponent("KEYDB.cfg")
+        guard let size = (try? FileManager.default.attributesOfItem(atPath:url.path))?[.size] as? Int,
+              size > 0,size <= 256*1024*1024,let file = try? FileHandle(forReadingFrom:url) else {
+            throw NoirError.message("AACS key database is missing. Use Settings → Download AACS keys, or place a compatible KEYDB.cfg in \(folder.path).")
+        }
+        defer { try? file.close() }
+        let head = try file.read(upToCount:4*1024*1024) ?? Data()
+        guard !head.starts(with:[0x50,0x4b]),(0...min(3,head.count)).contains(where: { (try? database(Data(head.dropLast($0)))) != nil }) else {
+            throw NoirError.message("AACS KEYDB.cfg is compressed or invalid. Download or install a valid plaintext key database in Settings.")
+        }
+    }
     static func database(_ input: Data) throws -> Data {
         guard input.count <= 128*1024*1024 else { throw NoirError.message("Key download exceeds 128 MB.") }
         var data = input
@@ -9,7 +53,10 @@ enum AacsKeys {
         // Only the first 4 MB is inspected; when that cut splits a multi-byte character, drop its partial bytes.
         let head = data.prefix(4*1024*1024), partial = head.count < data.count ? 3 : 0
         let text = (0...partial).lazy.compactMap { String(data:head.dropLast($0),encoding:.utf8) }.first
-        guard !data.isEmpty, data.count <= 256*1024*1024, let text, !text.lowercased().contains("<html"), text.contains("|") && text.contains("=") else { throw NoirError.message("The server did not return a valid plaintext KEYDB.cfg.") }
+        guard !data.isEmpty, data.count <= 256*1024*1024, let text, !text.lowercased().contains("<html"), text.contains("|"),
+              text.contains("=") || text.range(of:#"(?m)^[ \t]*\|[ \t]*(?:PK|DK|HC)[ \t]*\|"#,options:.regularExpression) != nil else {
+            throw NoirError.message("The server did not return a valid plaintext KEYDB.cfg.")
+        }
         return data
     }
     // Read just one validated ZIP member into memory. No archive paths are extracted.

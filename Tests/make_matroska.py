@@ -28,3 +28,6 @@ for method,name in [(zipfile.ZIP_STORED,'stored'),(zipfile.ZIP_DEFLATED,'deflate
 with wave.open(str(root/'audio.wav'),'wb') as audio:
     audio.setparams((2,2,44100,0,'NONE','not compressed'))
     audio.writeframes(b''.join(struct.pack('<hh',int(math.sin(i*2*math.pi*440/44100)*2000),int(math.sin(i*2*math.pi*660/44100)*2000)) for i in range(44100*5)))
+with wave.open(str(root/'short.wav'),'wb') as audio:
+    audio.setparams((1,2,48000,0,'NONE','not compressed'))
+    audio.writeframes(b'\x00\x00'*2400)

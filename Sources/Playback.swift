@@ -7,9 +7,24 @@ final class NativeCaptionObserver: NSObject, AVPlayerItemLegibleOutputPushDelega
     func outputSequenceWasFlushed(_ output: AVPlayerItemOutput) { text = "" }
 }
 
+final class CompatibilityVideoView: NSView {
+    /// VLC's embedded macOS renderer handles clicks, but its click handler
+    /// does not update the pointer position. Refresh that before the click.
+    @discardableResult func updatePointerPosition(_ event: NSEvent) -> Bool {
+        let point = convert(event.locationInWindow,from:nil)
+        guard bounds.contains(point),!isHiddenOrHasHiddenAncestor else { return false }
+        for child in subviews.reversed() {
+            if let target = child.hitTest(point) {
+                target.mouseMoved(with:event); return true
+            }
+        }
+        return false
+    }
+}
+
 final class VideoSurface: NSView {
     let nativeLayer = AVPlayerLayer()
-    let compatibilityView = NSView()
+    let compatibilityView = CompatibilityVideoView()
     let caption = NSTextField(wrappingLabelWithString: "")
     let empty = Panel(.clear)
     var rotation = 0, aspect = ""
@@ -75,6 +90,7 @@ final class PlaybackHub: @unchecked Sendable {
     private var compatibilityAudioID: Int?, compatibilitySubtitleID: Int?
     private var imageGenerator: AVAssetImageGenerator?, snapshotCompletion: ((Result<Void,Error>)->Void)?
     private var terminated = false
+    private var mouseMonitor: Any?
     private var nativeCaption: CaptionFile?
     private var embeddedCaptions: NativeCaptionObserver?
     private var externalSubtitles: [URL] = [], selectedExternal: URL?
@@ -89,6 +105,14 @@ final class PlaybackHub: @unchecked Sendable {
         self.surface = surface; surface.nativeLayer.player = player
         // Set once here on the main thread: setenv on vlcQueue could race AppKit's getenv calls.
         setenv("VLC_PLUGIN_PATH",Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/VLC/plugins").path,1)
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching:[.mouseMoved,.leftMouseDown]) { [weak self] event in
+            guard let self,self.backend == .compatibility,self.source?.disc == true,
+                  event.window === self.surface.window else { return event }
+            let forwarded = self.surface.compatibilityView.updatePointerPosition(event)
+            // Let AppKit deliver the original click to VLC's mouseDown handler.
+            // The moved event has already reached the correct embedded view.
+            return forwarded && event.type == .mouseMoved ? nil : event
+        }
     }
     func open(_ source: MediaSource, settings: Preferences, time: Double = 0, paused: Bool = false, forceCompatibility: Bool = false, preserveChoices: Bool = false) {
         generation += 1; let token = generation
@@ -142,9 +166,25 @@ final class PlaybackHub: @unchecked Sendable {
         let library = Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/libvlc.dylib").path
         let view = Unmanaged.passUnretained(surface.compatibilityView).toOpaque()
         let source = self.source!.playbackURL.absoluteString, hardware = settings.hardwareDecoding, rotation = self.rotation
+        let discRoot = self.source!.playbackURL.scheme == "bluray" && self.source!.localDiscURL != nil ? URL(fileURLWithPath:self.source!.playbackURL.path) : nil
         let storage = self.storage
         let start = Int64((resume ?? 0)*1000), paused = desiredPaused, volume = Int32(settings.volume), muted = settings.muted
         vlcQueue.async { [weak self] in
+            // Match Windows: reject missing protection prerequisites before
+            // libbluray opens the physical drive or starts authentication.
+            if let root = discRoot,FileManager.default.fileExists(atPath:root.appendingPathComponent("AACS").path) {
+                do {
+                    guard AacsRuntime.libraryPath != nil else { throw NoirError.message("AACS decoding library is unavailable. Rebuild with the bundled Apple Silicon AACS runtime or select a compatible library in Settings.") }
+                    try AacsKeys.validateInstalled()
+                } catch {
+                    let failure = error.localizedDescription
+                    DispatchQueue.main.async {
+                        guard let self,!self.terminated,token == self.generation else { return }
+                        self.info.failed = true; self.info.status = "AACS setup required"; self.info.failure = failure; self.update?(self.info)
+                    }
+                    return
+                }
+            }
             let v = storage.value ?? nvlc_create(library,view)
             storage.value = v
             let message = v == nil ? String(cString:nvlc_error()) : ""
@@ -175,7 +215,7 @@ final class PlaybackHub: @unchecked Sendable {
         open(source,settings:settings,time:position,paused:desiredPaused,forceCompatibility:true,preserveChoices:true)
     }
     func poll() {
-        guard backend != .none else { return }
+        guard backend != .none, !info.failed else { return }
         if backend == .native {
             if item?.status == .failed { fallback(item?.error?.localizedDescription ?? "Native decoder failed"); return }
             if !nativeLoaded && Date().timeIntervalSince(opening) > 15 { fallback("Native startup timed out"); return }
@@ -205,10 +245,19 @@ final class PlaybackHub: @unchecked Sendable {
             vlcQueue.async { [weak self] in
                 let state = nvlc_state(vlc)
                 let audio = Self.tracks(vlc,subtitle:false), subtitles = Self.tracks(vlc,subtitle:true)
+                var message = [CChar](repeating:0,count:2048)
+                nvlc_failure(vlc,&message,Int32(message.count))
+                let failure = String(cString:message)
                 DispatchQueue.main.async {
                     guard let self else { return }; self.vlcPollPending = false
-                    guard token == self.generation, self.backend == .compatibility else { return }
+                    guard token == self.generation, self.backend == .compatibility, !self.info.failed else { return }
                     self.info = PlaybackInfo(status:["Ready","Opening…","Buffering…","Playing","Paused","Stopped","Ended","Playback error"][min(7,max(0,Int(state.state)))], time:max(0,Double(state.time)/1000),duration:max(0,Double(state.length)/1000),playing:state.state == 3,ended:state.state == 6,failed:state.state == 7,ready:state.state == 3 || state.state == 4,size:CGSize(width:Int(state.width),height:Int(state.height)),audio:audio,subtitles:subtitles,audioID:Int(state.audio),subtitleID:Int(state.subtitle),chapter:Int(state.chapter),chapters:Int(state.chapters))
+                    // VLC can report Ended after failing to open a protected disc.
+                    // This must not enter Repeat One or erase the original failure.
+                    if state.state == 7 || state.failed != 0 {
+                        self.info.failed = true; self.info.ended = false; self.info.ready = false; self.info.playing = false; self.info.status = "Playback error"
+                        self.info.failure = failure.isEmpty ? "No playable title could be opened from this source." : failure
+                    }
                     if self.info.ready {
                         // VLC drops its input track inventory at EOF. Keep the
                         // last live selection for replay instead of treating that
@@ -401,7 +450,7 @@ final class PlaybackHub: @unchecked Sendable {
     func stop(completion: (()->Void)? = nil) {
         generation += 1; metadataTask?.cancel(); cancelSnapshot("Playback stopped before the snapshot was saved.")
         let token = generation, storage = self.storage
-        player.pause(); player.replaceCurrentItem(with:nil); backend = .none; info = PlaybackInfo()
+        player.pause(); player.replaceCurrentItem(with:nil); item = nil; asset = nil; backend = .none; info = PlaybackInfo()
         vlcQueue.async { [weak self] in
             if let v = storage.value { nvlc_stop(v) }
             if let completion {
@@ -412,6 +461,7 @@ final class PlaybackHub: @unchecked Sendable {
         surface.nativeLayer.isHidden = true; surface.compatibilityView.isHidden = true; update?(info)
     }
     func shutdown(_ completion: @escaping ()->Void) {
+        if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor); self.mouseMonitor = nil }
         stop(); terminated = true; let storage = self.storage; vlc = nil
         vlcQueue.async { if let v = storage.value { nvlc_destroy(v); storage.value = nil }; RunLoop.main.perform(inModes:[.default,.modalPanel,.eventTracking],block:completion) }
     }

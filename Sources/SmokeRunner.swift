@@ -1,10 +1,16 @@
 import AppKit
+private final class PointerProbeView: NSView {
+    var moves = 0
+    var point = NSPoint.zero
+    override func mouseMoved(with event: NSEvent) { moves += 1; point = convert(event.locationInWindow,from:nil) }
+}
 // Deterministic integration checks are invoked only with --smoke-test <fixture directory>.
 final class SmokeRunner {
     weak var app: AppDelegate?
     let directory: URL
     init(app: AppDelegate,directory: URL) { self.app = app; self.directory = directory }
     var checks: [[String:Any]] = []
+    var cleanup: (()->Void)?
     func check(_ name: String,_ passed: Bool,_ detail: String = "") { checks.append(["check":name,"passed":passed,"detail":detail]); NSLog("NOIR check %@: %@ %@",name,passed ? "PASS" : "FAIL",detail) }
     func delay(_ seconds: Double = 0.8,_ action: @escaping ()->Void) { DispatchQueue.main.asyncAfter(deadline:.now()+seconds,execute:action) }
     func until(_ name: String,timeout: Double = 12,condition: @escaping ()->Bool,then: @escaping ()->Void) {
@@ -43,14 +49,31 @@ final class SmokeRunner {
             let remoteDisc = MediaSource(URL(string:"dvd://remote.example/Volumes/DVD")!)
             check("remote disc cannot target local storage",remoteDisc.localDiscURL == nil)
             let optical = OpticalDevice(volume:directory,bsdName:"synthetic-optical",registryID:1)
-            var requests: [URL] = []
+            var requests: [OpticalDevice] = []
             let ejector = DiscEjector(inspect:{ _ in optical },unmount:{ requests.append($0) })
             try ejector.eject(optical)
-            check("verified optical device reaches eject adapter",requests == [directory])
+            check("verified optical device reaches eject adapter",requests == [optical])
             requests = []
             let changed = DiscEjector(inspect:{ _ in OpticalDevice(volume:optical.volume,bsdName:optical.bsdName,registryID:2) },unmount:{ requests.append($0) })
             let rejected = (try? changed.eject(optical)) == nil
             check("changed optical device is not ejected",rejected && requests.isEmpty)
+            let unmounted = OpticalDevice(volume:nil,bsdName:"synthetic-unmounted",registryID:3)
+            let fallback = DiscEjector(inspect:{ $0 },unmount:{ requests.append($0) },available:{ [unmounted] })
+            check("unmounted optical disc can be selected without active playback",fallback.targets(preferred:[]) == [unmounted])
+            try fallback.eject(unmounted)
+            check("unmounted optical disc reaches whole-device eject adapter",requests == [unmounted])
+            let multiple = DiscEjector(available:{ [optical,unmounted] })
+            check("multiple optical discs require a selection",multiple.targets(preferred:[]).count == 2)
+            let partitionSource = MediaSource(URL(fileURLWithPath:"/Volumes/Test DVD"),disc:true)
+            let whole = OpticalDevice(volume:nil,bsdName:"synthetic-whole",registryID:4)
+            let partition = OpticalDevice(volume:partitionSource.url,bsdName:whole.bsdName,registryID:whole.registryID)
+            let partitioned = DiscEjector(available:{ [whole] },locate:{ _ in partition })
+            check("partitioned optical selection retains mounted volume",partitioned.targets(preferred:[partitionSource]) == [partition])
+            check("partitioned optical playback is identified by whole-device identity",partitioned.contains(partitionSource,on:whole))
+            check("replacement optical media cannot match playing disc",!partitioned.contains(partitionSource,on:OpticalDevice(volume:partition.volume,bsdName:whole.bsdName,registryID:5)))
+            check("bundled AACS runtime loads and exports playback interface",AacsRuntime.libraryPath != nil)
+            let lookup = ProcessInfo.processInfo.environment["LIBAACS_PATH"].map { $0+".dylib" }
+            check("libbluray macOS lookup resolves the validated AACS library",lookup == AacsRuntime.libraryPath)
             let caption = try CaptionFile(directory.appendingPathComponent("plain.srt")); check("caption boundaries",caption.text(at:1).contains("native") && caption.text(at:12).isEmpty)
             check("complex caption routes to compatibility",(try? CaptionFile(directory.appendingPathComponent("styled.srt"))) == nil)
             for type in ["stored","deflated"] {
@@ -68,7 +91,31 @@ final class SmokeRunner {
         }
     }
     func modelChecks(_ app: AppDelegate) throws {
+        let container = CompatibilityVideoView(frame:NSRect(x:20,y:30,width:200,height:100))
+        let renderer = PointerProbeView(frame:NSRect(x:0,y:0,width:200,height:100))
+        container.addSubview(renderer); app.ui.addSubview(container)
+        let location = renderer.convert(NSPoint(x:75,y:25),to:nil)
+        if let click = NSEvent.mouseEvent(with:.leftMouseDown,location:location,modifierFlags:[],timestamp:0,windowNumber:app.window.windowNumber,context:nil,eventNumber:0,clickCount:1,pressure:1) {
+            check("disc click refreshes renderer pointer at correct coordinates",container.updatePointerPosition(click) && renderer.moves == 1 && abs(renderer.point.x-75)<0.01 && abs(renderer.point.y-25)<0.01)
+            container.isHidden = true
+            check("hidden compatibility video does not receive disc pointer input",!container.updatePointerPosition(click) && renderer.moves == 1)
+        } else { check("disc pointer test event created",false) }
+        container.removeFromSuperview()
         let native = directory.appendingPathComponent("native.mp4"), plain = directory.appendingPathComponent("plain.srt")
+        let keysFolder = directory.appendingPathComponent("key-validation")
+        try FileManager.default.createDirectory(at:keysFolder,withIntermediateDirectories:true)
+        for (kind,text) in [
+            ("PK","| PK | 0x00000000000000000000000000000000\n"),
+            ("DK","| DK | DEVICE_KEY 0x00000000000000000000000000000000 | DEVICE_NODE 0x0000 | KEY_UV 0x00000000000000000000000000000000 | KEY_U_MASK_SHIFT 0x00\n"),
+            ("HC","| HC | HOST_PRIV_KEY 0x"+String(repeating:"0",count:40)+" | HOST_CERT 0x"+String(repeating:"0",count:184)+"\n")
+        ] {
+            try text.write(to:keysFolder.appendingPathComponent("KEYDB.cfg"),atomically:true,encoding:.utf8)
+            check("key-only \(kind) configuration passes installed preflight",(try? AacsKeys.validateInstalled(in:keysFolder)) != nil)
+        }
+        for text in ["<html>| PK | server failure</html>","not a key database"] {
+            try text.write(to:keysFolder.appendingPathComponent("KEYDB.cfg"),atomically:true,encoding:.utf8)
+            check("invalid key configuration remains rejected",(try? AacsKeys.validateInstalled(in:keysFolder)) == nil)
+        }
         check("folder identity ignores trailing slash",MediaSource(URL(string:"file:///tmp/noir-folder/")!).identity == MediaSource(URL(string:"file:///tmp/noir-folder")!).identity)
         check("network root URL title uses host",MediaSource(URL(string:"https://example.com/")!).title == "example.com")
         // Settings written by another version: missing keys keep defaults, a bad recent is dropped, values are clamped.
@@ -289,9 +336,83 @@ final class SmokeRunner {
         app.ui.table.selectRowIndexes([0],byExtendingSelection:false); app.removeSelected()
         app.perform("next")
         check("Next after removing the current item plays its successor",app.active?.url == audio,app.active?.title ?? "none")
-        finish()
+        discFailures()
+    }
+    func discFailures() {
+        guard let app else { return }
+        // Keep a regular current item so these expected failures do not open
+        // a modal disc-error sheet. The real PlaybackHub and VLC still run.
+        app.preferences.repeatMode = 2; app.handledEnd = false
+        let protected = directory.appendingPathComponent("protected-without-keys")
+        do {
+            try FileManager.default.createDirectory(at:protected.appendingPathComponent("BDMV"),withIntermediateDirectories:true)
+            try FileManager.default.createDirectory(at:protected.appendingPathComponent("AACS"),withIntermediateDirectories:true)
+        } catch { check("protected disc fixture",false,error.localizedDescription); finish(); return }
+        app.hub.open(MediaSource(protected,disc:true),settings:app.preferences)
+        until("protected disc without keys fails before opening drive",condition:{ app.hub.info.failed && app.hub.info.failure.contains("AACS") }) {
+            self.check("protection setup failure does not trigger Repeat One",!app.hub.info.ended && app.hub.info.status == "AACS setup required")
+            app.handledEnd = false
+            app.hub.open(MediaSource(self.directory.appendingPathComponent("disc-bluray"),disc:true),settings:app.preferences)
+            self.until("VLC disc failure preserves decoder error",condition:{ app.hub.info.failed && !app.hub.info.failure.isEmpty }) {
+                self.delay {
+                    self.check("failed VLC disc stays failed instead of ended",app.hub.info.failed && !app.hub.info.ended && !app.hub.info.ready)
+                    self.failureRecovery()
+                }
+            }
+        }
+    }
+    func failureRecovery() {
+        guard let app else { return }
+        guard ProcessInfo.processInfo.environment["NOIR_DATA_DIR"] != nil else { check("failure recovery requires isolated settings",false); finish(); return }
+        let key = AacsKeys.folder.appendingPathComponent("KEYDB.cfg"), original = try? Data(contentsOf:AacsKeys.folder.appendingPathComponent("KEYDB.cfg"))
+        let savedUpdate = app.hub.update
+        cleanup = { [weak app] in
+            app?.hub.update = savedUpdate
+            if let original { try? original.write(to:key,options:.atomic) } else { try? FileManager.default.removeItem(at:key) }
+        }
+        do { try FileManager.default.createDirectory(at:AacsKeys.folder,withIntermediateDirectories:true); if FileManager.default.fileExists(atPath:key.path) { try FileManager.default.removeItem(at:key) } }
+        catch { check("isolated key setup",false,error.localizedDescription); finish(); return }
+        // Suppress only expected error sheets while exercising the real Play action.
+        app.hub.update = { [weak app] info in if !info.failed { app?.updated(info) } }
+        app.preferences.repeatMode = 0; app.preferences.autoPlayNext = false; app.preferences.preferNative = false
+        let source = MediaSource(directory.appendingPathComponent("protected-without-keys"),disc:true)
+        app.queue = [source]; app.current = nil; app.filter(); app.play(0)
+        until("retry fixture reports missing AACS keys",condition:{ app.hub.info.failed && app.hub.info.status == "AACS setup required" }) {
+            do {
+                try "| PK | 0x00000000000000000000000000000000\n".write(to:key,atomically:true,encoding:.utf8)
+                try AacsKeys.validateInstalled()
+            } catch { self.check("install synthetic retry credentials",false,error.localizedDescription); self.finish(); return }
+            app.perform("play")
+            self.check("Play reopens failed source after installing keys",!app.hub.info.failed && app.hub.info.status == "Opening…" && app.hub.source?.id == source.id)
+            self.until("retry reaches decoder instead of stale setup failure",condition:{ app.hub.info.failed && app.hub.info.status != "AACS setup required" && !app.hub.info.failure.contains("key database is missing") }) {
+                self.cleanup?(); self.cleanup = nil; self.delayedEOF()
+            }
+        }
+    }
+    func delayedEOF() {
+        guard let app else { return }
+        app.timer?.invalidate(); app.timer = nil
+        app.preferences.preferNative = false; app.preferences.autoPlayNext = true; app.preferences.repeatMode = 0
+        let short = directory.appendingPathComponent("short.wav"), next = directory.appendingPathComponent("audio.wav")
+        let savedUpdate = app.hub.update
+        var cleanEOF = false
+        cleanup = { [weak app] in app?.hub.update = savedUpdate }
+        app.hub.update = { [weak app] info in
+            if app?.hub.source?.url == short && info.ended { cleanEOF = !info.failed }
+            savedUpdate?(info)
+        }
+        app.queue = []; app.current = nil; app.add([MediaSource(short),MediaSource(next)])
+        // Model a menu/window tracking operation which delays the first UI poll.
+        delay(4) {
+            app.hub.poll()
+            self.until("successful EOF survives a delayed first playback poll",condition:{ cleanEOF }) {
+                self.check("delayed EOF advances queue normally",app.hub.source?.url == next && !app.hub.info.failed)
+                self.cleanup?(); self.cleanup = nil; self.finish()
+            }
+        }
     }
     func finish() {
+        cleanup?(); cleanup = nil
         let passed = !checks.contains { $0["passed"] as? Bool == false }
         let report: [String:Any] = ["passed":passed,"architecture":"arm64","checks":checks,"physicalDiscTested":false]
         if let data = try? JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]) { try? data.write(to:directory.appendingPathComponent("smoke-report.json"),options:.atomic) }

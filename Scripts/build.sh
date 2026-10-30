@@ -9,6 +9,7 @@ if [[ ! -f "$VLC_SOURCE/Contents/MacOS/lib/libvlc.dylib" ]]; then
   exit 1
 fi
 mkdir -p "$BUILD_DIR/objects" "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" "$APP/Contents/Resources/VLC"
+bash "$ROOT/Scripts/fetch-aacs.sh"
 # Clang module caches embed their absolute path; discard one copied from another checkout.
 if [[ "$(cat "$BUILD_DIR/module-cache/.root" 2>/dev/null)" != "$BUILD_DIR" ]]; then
   rm -rf "$BUILD_DIR/module-cache"; mkdir -p "$BUILD_DIR/module-cache"; printf '%s' "$BUILD_DIR" > "$BUILD_DIR/module-cache/.root"
@@ -50,6 +51,9 @@ if ! python3 "$ROOT/Scripts/runtime-cache.py" check "$VLC_SOURCE/Contents/MacOS"
   python3 "$ROOT/Scripts/runtime-cache.py" update "$VLC_SOURCE/Contents/MacOS" "$APP" "$BUILD_DIR/.arm64-runtime"
 fi
 mkdir -p "$APP/Contents/Resources/Licenses"
+mkdir -p "$APP/Contents/Frameworks/AACS" "$APP/Contents/Resources/Licenses/AACS"
+cp -P "$BUILD_DIR/aacs-runtime/"*.dylib "$APP/Contents/Frameworks/AACS/"
+cp "$BUILD_DIR/aacs-runtime/Licenses/"*.txt "$APP/Contents/Resources/Licenses/AACS/"
 cp "$ROOT/Resources/ThirdParty.md" "$APP/Contents/Resources/Licenses/ThirdParty.md"
 cp "$ROOT/Resources/Licenses/"*.txt "$APP/Contents/Resources/Licenses/"
 codesign --force --sign - "$APP"

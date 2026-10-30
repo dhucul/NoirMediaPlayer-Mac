@@ -15,6 +15,9 @@ def inventory(root, directories):
         if not folder.is_dir():
             raise ValueError(f'Missing runtime directory: {folder}')
         for path in sorted(folder.rglob('*')):
+            # AACS is built, verified and copied independently by fetch-aacs.sh.
+            if directory == 'Contents/Frameworks' and path.relative_to(folder).parts[0] == 'AACS':
+                continue
             name = path.relative_to(root).as_posix()
             if path.is_symlink():
                 if not path.exists():

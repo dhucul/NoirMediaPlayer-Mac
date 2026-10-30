@@ -18,12 +18,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     var smokeRunner: SmokeRunner?
     var keyDownload: KeyDownload?
     var discEjector = DiscEjector()
+    var ejectOperation: UUID?
     var active: MediaSource? { queue.first { $0.id == current } }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named:.darkAqua)
-        if !preferences.aacsLibrary.isEmpty,FileManager.default.fileExists(atPath:preferences.aacsLibrary) { setenv("LIBAACS_PATH",preferences.aacsLibrary,1) }
+        AacsRuntime.initialize(configured:preferences.aacsLibrary)
         window = NSWindow(contentRect:NSRect(x:0,y:0,width:1440,height:880),styleMask:[.titled,.closable,.miniaturizable,.resizable,.fullSizeContentView],backing:.buffered,defer:false)
         window.title = "NOIR — Cinema without clutter"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
+        window.acceptsMouseMovedEvents = true
         window.backgroundColor = Palette.ink; window.contentView = ui; window.delegate = self; window.minSize = NSSize(width:1080,height:680); window.isReleasedWhenClosed = false
         if let screen = NSScreen.main { let frame = screen.visibleFrame; window.setContentSize(NSSize(width:min(1440,frame.width-60),height:min(880,frame.height-60))) }
         window.center(); window.level = preferences.alwaysOnTop ? .floating : .normal
@@ -78,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
     @objc func menuAction(_ sender: NSMenuItem) { if let action = sender.representedObject as? String { perform(action) } }
     func perform(_ action: String) {
+        if ejectOperation != nil && ["play","stop","next","previous","clear","remove","rotate"].contains(action) { showNotice("Wait for disc ejection to finish"); return }
         switch action {
         case "open": chooseFiles()
         case "folder": chooseFolder()
@@ -85,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         case "eject": eject()
         case "network": network()
         case "play":
-            if hub.backend == .none {
+            if hub.backend == .none || hub.info.failed {
                 // After Stop, resume the current item; the table selection may be stale.
                 if let index = queue.firstIndex(where: { $0.id == current }) { play(index) }
                 else if ui.table.selectedRow >= 0 { playSelection() } else if !queue.isEmpty { play(0) } else { chooseFiles() }
@@ -137,17 +140,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
     }
     func eject() {
-        guard let source = active,let device = discEjector.target(for:source) else { showNotice("Choose a mounted optical disc first"); return }
-        bookmark(); let ejector = discEjector
-        hub.stop { [weak self] in
-            // Unmounting waits for the drive and can take seconds; keep the interface responsive.
-            DispatchQueue.global(qos:.userInitiated).async {
-                let result = Result { try ejector.eject(device) }
-                DispatchQueue.main.async {
-                    switch result { case .success: self?.showNotice("Disc ejected"); case .failure(let error): self?.alert("Cannot eject disc",error.localizedDescription) }
+        guard ejectOperation == nil else { showNotice("Disc ejection is already in progress"); return }
+        let operation = UUID(), ejector = discEjector
+        ejectOperation = operation; ui.buttons["eject"]?.isEnabled = false
+        var preferred = active.map { [$0] } ?? []
+        if filtered.indices.contains(ui.table.selectedRow) { preferred.append(queue[filtered[ui.table.selectedRow]]) }
+        let sources = preferred
+        let playbackSource = hub.source
+        showNotice("Finding optical disc…")
+        DispatchQueue.global(qos:.userInitiated).async { [weak self] in
+            let devices = ejector.targets(preferred:sources)
+            let playingFromDisc = devices.count == 1 && playbackSource.map { ejector.contains($0,on:devices[0]) } == true
+            DispatchQueue.main.async {
+                guard let self,self.ejectOperation == operation else { return }
+                guard devices.count == 1,let device = devices.first else {
+                    self.finishEject(operation)
+                    self.alert("Cannot eject disc",devices.isEmpty ? "No optical disc is detected by macOS. Check the drive connection and that a disc is inserted." : "Multiple optical discs are connected. Select a disc in the queue and try Eject Disc again.")
+                    return
                 }
+                let release: ()->Void = { [weak self] in
+                    guard let self,self.ejectOperation == operation else { return }
+                    self.showNotice("Ejecting \(device.title)…")
+                    DispatchQueue.global(qos:.userInitiated).async { [weak self] in
+                        let result = Result { try ejector.eject(device) }
+                        DispatchQueue.main.async {
+                            guard let self,self.ejectOperation == operation else { return }
+                            self.finishEject(operation)
+                            switch result {
+                            case .success:
+                                // Remove stale sources, as on Windows, so Play cannot
+                                // immediately reopen a disc that has just been ejected.
+                                if let volume = device.volume {
+                                    let removed = Set(self.queue.filter { source in
+                                        guard let url = source.localDiscURL ?? (source.url.isFileURL ? source.url : nil) else { return false }
+                                        return url.standardizedFileURL.path == volume.standardizedFileURL.path || url.standardizedFileURL.path.hasPrefix(volume.standardizedFileURL.path+"/")
+                                    }.map(\.id))
+                                    self.queue.removeAll { removed.contains($0.id) }
+                                    if let current = self.current,removed.contains(current) { self.current = nil }
+                                    self.history.removeAll { removed.contains($0) }; self.shuffleBag.removeAll { removed.contains($0) }; self.filter()
+                                }
+                                self.updated(self.hub.info); self.showNotice("Disc ejected")
+                            case .failure(let error): self.alert("Cannot eject disc",error.localizedDescription)
+                            }
+                        }
+                    }
+                }
+                if playingFromDisc {
+                    self.bookmark(); self.handledEnd = true; self.showNotice("Releasing disc for ejection…")
+                    self.hub.stop(completion:release)
+                } else { release() }
             }
         }
+        DispatchQueue.main.asyncAfter(deadline:.now()+40) { [weak self] in
+            guard let self,self.ejectOperation == operation else { return }
+            self.finishEject(operation); self.alert("Cannot eject disc","Playback or the optical drive did not finish releasing the disc. Close other apps using this disc and try again.")
+        }
+    }
+    private func finishEject(_ operation: UUID) {
+        guard ejectOperation == operation else { return }
+        ejectOperation = nil; ui.buttons["eject"]?.isEnabled = true
     }
     func network() {
         let alert = NSAlert(); alert.messageText = "Open network stream"; alert.informativeText = "HTTP, HTTPS, RTSP, RTP, or UDP"; alert.addButton(withTitle:"Open"); alert.addButton(withTitle:"Cancel")
@@ -182,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         return (urls.filter { !caption($0) },urls.filter(caption))
     }
     func add(_ sources: [MediaSource]) {
+        guard ejectOperation == nil else { showNotice("Wait for disc ejection to finish"); return }
         guard !sources.isEmpty else { showNotice("No playable media found"); return }
         var first: Int?
         for source in sources {
@@ -191,6 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         shuffleBag = []; shuffleSeen = []; filter(); if let first { play(first) }
     }
     func play(_ index: Int) {
+        guard ejectOperation == nil else { showNotice("Wait for disc ejection to finish"); return }
         guard queue.indices.contains(index) else { return }
         bookmark(); let source = queue[index]; current = source.id; vacatedIndex = nil; handledEnd = false; history.append(source.id); if history.count > 500 { history.removeFirst() }
         if preferences.shuffle { shuffleSeen.insert(source.id) }
@@ -242,7 +295,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             if preferences.repeatMode == 2 { handledEnd = false; hub.replay() }
             else if preferences.autoPlayNext { next(1,user:false) }
         }
-        if info.failed && !handledEnd { handledEnd = true; showNotice("Cannot play this source") }
+        if info.failed && !handledEnd {
+            handledEnd = true
+            if active?.disc == true {
+                let help = info.failure.localizedCaseInsensitiveContains("AACS") ? "\n\n\(AacsRuntime.status). Protected Blu-rays also need a matching KEYDB.cfg. Open Settings to install or update the key database." : ""
+                alert("Cannot play disc",(info.failure.isEmpty ? "The disc could not be opened." : info.failure)+help)
+            } else { showNotice(info.failure.isEmpty ? "Cannot play this source" : info.failure) }
+        }
     }
     func filter() {
         let query = ui.search.stringValue
@@ -335,7 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let note = label("Playback preferences apply when a source opens.\nmacOS manages decoding for native playback.",10,color:Palette.muted); note.maximumNumberOfLines = 2; note.frame = NSRect(x:18,y:224,width:316,height:36); panel.addSubview(note)
         let aacs = section("BLU-RAY AACS"); aacs.frame = NSRect(x:18,y:274,width:316,height:16); panel.addSubview(aacs)
         let keyExists=FileManager.default.fileExists(atPath:AacsKeys.folder.appendingPathComponent("KEYDB.cfg").path)
-        let aacsStatus=label((preferences.aacsLibrary.isEmpty ? "AACS library not configured" : "External AACS library configured") + (keyExists ? "\nKey database found; disc keys not yet verified" : "\nNo key database found"),10,color:Palette.muted); aacsStatus.maximumNumberOfLines=2; aacsStatus.frame=NSRect(x:18,y:296,width:316,height:34); panel.addSubview(aacsStatus)
+        let aacsStatus=label(AacsRuntime.status + (keyExists ? "\nKey database found; disc keys not yet verified" : "\nNo key database found"),10,color:Palette.muted); aacsStatus.maximumNumberOfLines=2; aacsStatus.frame=NSRect(x:18,y:296,width:316,height:34); panel.addSubview(aacsStatus)
         let library=ActionButton("Choose library…") { [weak self] in self?.chooseAacs() }; library.frame=NSRect(x:18,y:342,width:152,height:30); panel.addSubview(library)
         let keys = ActionButton("Open key folder",symbol:"folder") { [weak self] in self?.openKeys() }; keys.frame = NSRect(x:182,y:342,width:152,height:30); panel.addSubview(keys)
         let download=ActionButton("Download AACS keys",symbol:"arrow.down.circle") { [weak self] in self?.downloadKeys() }; download.frame=NSRect(x:18,y:384,width:316,height:30); download.isEnabled=keyDownload==nil; panel.addSubview(download)

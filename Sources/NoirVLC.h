@@ -1,10 +1,11 @@
 #pragma once
 #include <stdint.h>
 typedef struct NVLC NVLC;
-typedef struct { int state; int64_t time, length; unsigned width, height; int audio, subtitle, chapter, chapters; } NVLCState;
+typedef struct { int state; int64_t time, length; unsigned width, height; int audio, subtitle, chapter, chapters, failed; } NVLCState;
 // VLC_PLUGIN_PATH must be set once, on the main thread, before the first call.
 NVLC *nvlc_create(const char *library, void *view);
 const char *nvlc_error(void);
+void nvlc_failure(NVLC *v, char *message, int capacity);
 void nvlc_destroy(NVLC *v);
 int nvlc_open(NVLC *v, const char *source, int hardware, int rotation, int64_t start);
 void nvlc_stop(NVLC *v);

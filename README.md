@@ -40,7 +40,11 @@ To use an existing official VLC 3.0.23 bundle instead:
 NOIR_VLC_APP=/Applications/VLC.app bash Scripts/build.sh
 ```
 
-The build uses only Apple's SDK, C/Swift compilers, shell utilities and Python 3.
+The build uses Apple's SDK, C/Swift compilers, make, shell utilities and Python 3.
+`Scripts/fetch-aacs.sh` builds pinned, SHA-256-verified VideoLAN libaacs 0.12.0,
+GNU libgcrypt 1.12.4 and libgpg-error 1.61 sources for arm64 macOS 13. The first
+build needs network access and takes a few minutes; subsequent builds validate
+the cached libraries and license files. No Homebrew installation is required.
 There are no Swift package or .NET dependencies. Universal input runtimes are reduced
 to their arm64 slices; Intel-only plug-ins and the standalone VLC interface are omitted.
 The build signs each binary and the application ad hoc and verifies the result. Public
@@ -120,7 +124,21 @@ the cache marker. It uses a separate generated bundle under `build/runtime-regre
 
 Build 2 fixes all six initial review findings: VLC replay at EOF, bookmark loss after
 Stop, optical-only eject selection, disc identity in playlists, one-item Shuffle
-repeat cycles, and stale runtime packaging caches. Eject validates the whole device's
+repeat cycles, and stale runtime packaging caches. Build 4 adds the missing bundled AACS runtime and validates the runtime/key database
+before opening a protected Blu-ray. VLC decoder errors remain visible instead of
+becoming Ended or triggering Repeat One. Eject finds optical media independently
+of active playback (including unmounted media), detaches VLC media before ejection,
+uses a bounded whole-device eject request, and removes stale disc queue entries.
+Disc menu mouse input now refreshes the embedded renderer's pointer before clicks
+and forwards hover movement, preserving VLC's Retina and letterbox coordinate mapping.
+
+Build 5 reopens failed sources when Play is pressed, preserves mounted child
+partition paths while identifying playback by optical-device identity, accepts
+key-only PK/DK/HC AACS configurations, and records VLC's explicit error event so
+successful EOF remains successful when UI polling is delayed. Regression checks
+cover these cases without ejecting physical media.
+
+Eject validates the whole device's
 I/O Registry optical-media class and identity, waits for playback handles to close,
 and rejects a replacement device before submitting an unmount request.
 
@@ -129,12 +147,12 @@ This is a working preview, not a claim of complete Windows parity:
 - Physical DVD/Blu-ray playback, authored menu interaction and eject need real-drive
   verification. Multi-track files, chapter-rich media and live network protocols need
   a broader real-media matrix beyond the generated fixtures.
-- Encrypted Blu-ray requires a compatible external arm64 libaacs installation and keys;
-  a Mac libaacs build is not bundled. Settings provides alternate arm64 library selection,
+- Encrypted Blu-ray uses the bundled arm64 libaacs runtime and requires compatible keys.
+  Settings provides alternate arm64 library selection,
   the standard key folder and an explicit key-download button using the same service as
   Windows. Downloads are bounded, HTTPS-only and validated; ZIP contents are read in memory
   without extracting archive paths. Library changes require a restart. Availability and
-  coverage of that third-party key service have not been verified. BD-J menus can require
+  coverage of that third-party key service depend on the disc. BD-J menus can require
   additional Java components.
 - Plain UTF-8 SRT/WebVTT renders natively. Formatted/positioned captions and other formats
   hand the original file to VLC. Native and VLC embedded tracks depend on their respective

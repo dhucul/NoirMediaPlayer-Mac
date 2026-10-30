@@ -98,7 +98,7 @@ final class PlayerInterface: Panel {
         for v in [sourceLabel,search,queueLabel,queueCount,queueScroll,emptyQueue] { sidebar.addSubview(v) }
         search.placeholderString = "Filter queue"; search.font = .systemFont(ofSize:11); search.setAccessibilityLabel("Filter queue")
         sourceButtons = [("open","Open media","doc.on.doc"),("folder","Open folder","folder"),("disc","Play DVD / disc","opticaldisc"),("eject","Eject disc","eject"),("network","Open network stream","network")].map { key,title,symbol in
-            let b = ActionButton(title,symbol:symbol) { [weak self] in self?.action?(key) }; b.flat = true; b.alignment = .left; sidebar.addSubview(b); return b
+            let b = ActionButton(title,symbol:symbol) { [weak self] in self?.action?(key) }; b.flat = true; b.alignment = .left; sidebar.addSubview(b); if key == "eject" { buttons[key] = b }; return b
         }
         let column = NSTableColumn(identifier:NSUserInterfaceItemIdentifier("queue")); column.width = 220; table.addTableColumn(column); table.headerView = nil; table.rowHeight = 54; table.intercellSpacing = .zero; table.backgroundColor = Palette.panel; table.selectionHighlightStyle = .regular; table.usesAlternatingRowBackgroundColors = false
         table.setAccessibilityLabel("Play queue"); queueScroll.documentView = table; queueScroll.hasVerticalScroller = true; queueScroll.drawsBackground = false

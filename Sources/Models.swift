@@ -110,6 +110,7 @@ struct PlaybackInfo {
     var size = CGSize.zero
     var audio: [TrackChoice] = [], subtitles: [TrackChoice] = []
     var audioID = -1, subtitleID = -1, chapter = -1, chapters = 0
+    var failure = ""
 }
 enum SourceReader {
     static let extensions: Set<String> = ["mp4","m4v","mov","mkv","avi","wmv","webm","mpg","mpeg","m2ts","mts","ts","vob","ogv","3gp","asf","flv","mp3","m4a","aac","wav","aiff","aif","flac","ogg","opus","wma","ac3","ape"]
