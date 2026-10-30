@@ -136,10 +136,19 @@ final class PlayerInterface: Panel {
     @discardableResult func button(_ key: String,_ title: String,symbol: String? = nil,help: String = "",parent: NSView) -> ActionButton {
         let b = ActionButton(title,symbol:symbol,help:help) { [weak self] in self?.action?(key) }; buttons[key] = b; parent.addSubview(b); return b
     }
+    private var headerHeight: CGFloat { compact ? 38 : 50 }
+    private var footerHeight: CGFloat { compact ? 0 : 28 }
+    private var sidebarWidth: CGFloat { showSidebar && !compact ? 246 : 0 }
+    private var inspectorWidth: CGFloat { showInspector && !compact ? 280 : 0 }
+    private func controlHeight(for width: CGFloat) -> CGFloat { compact ? 78 : width < 810 ? 150 : 108 }
+    func contentSize(forVideoSize size: NSSize) -> NSSize {
+        let centerWidth = size.width+(compact ? 0 : 24)
+        return NSSize(width:centerWidth+sidebarWidth+inspectorWidth,
+                      height:size.height+headerHeight+footerHeight+controlHeight(for:centerWidth)+(compact ? 0 : 12))
+    }
     override func layout() {
         super.layout(); let w = bounds.width, h = bounds.height
-        let headerHeight: CGFloat = compact ? 38 : 50, footerHeight: CGFloat = compact ? 0 : 28
-        let left: CGFloat = showSidebar && !compact ? 246 : 0, right: CGFloat = showInspector && !compact ? 280 : 0
+        let left = sidebarWidth, right = inspectorWidth
         header.frame = NSRect(x:0,y:0,width:w,height:headerHeight); footer.frame = NSRect(x:0,y:h-footerHeight,width:w,height:footerHeight); footer.isHidden = compact
         sidebar.frame = NSRect(x:0,y:headerHeight,width:left,height:h-headerHeight-footerHeight); sidebar.isHidden = left == 0
         inspector.frame = NSRect(x:w-right,y:headerHeight,width:right,height:h-headerHeight-footerHeight); inspector.isHidden = right == 0
@@ -157,7 +166,8 @@ final class PlayerInterface: Panel {
         emptyQueue.frame = NSRect(x:14,y:301+qh/2-24,width:218,height:50)
         buttons["save"]?.frame = NSRect(x:14,y:sidebar.bounds.height-44,width:132,height:32); buttons["remove"]?.frame = NSRect(x:154,y:sidebar.bounds.height-44,width:34,height:32); buttons["clear"]?.frame = NSRect(x:196,y:sidebar.bounds.height-44,width:34,height:32)
         let cw = center.bounds.width, ch = center.bounds.height, tall = cw < 810
-        let controlHeight: CGFloat = compact ? 78 : tall ? 150 : 108
+        let controlHeight = controlHeight(for:cw)
+        video.fitsVideoToBounds = compact
         video.frame = NSRect(x:compact ? 0 : 12,y:compact ? 0 : 12,width:cw-(compact ? 0 : 24),height:max(40,ch-controlHeight-(compact ? 0 : 12)))
         controls.frame = NSRect(x:0,y:ch-controlHeight,width:cw,height:controlHeight)
         elapsed.frame = NSRect(x:18,y:12,width:46,height:16); remaining.frame = NSRect(x:cw-66,y:12,width:48,height:16); timeline.frame = NSRect(x:68,y:10,width:max(20,cw-136),height:20)

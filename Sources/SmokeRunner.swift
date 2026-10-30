@@ -87,7 +87,7 @@ final class SmokeRunner {
         // Issued before AVFoundation is ready: the position must survive startup.
         app.hub.seek(4)
         until("AVFoundation ready",condition:{ app.hub.backend == .native && app.hub.info.ready && app.ui.video.nativeLayer.isReadyForDisplay }) {
-            self.until("seek during native startup is kept",timeout:3,condition:{ app.hub.info.time >= 3.9 && app.hub.info.time < 6 }) { self.nativeControls() }
+            self.until("seek during native startup is kept",timeout:3,condition:{ app.hub.info.time >= 3.9 && app.hub.info.time < 6 }) { self.nativeWindowSizing() }
         }
     }
     func modelChecks(_ app: AppDelegate) throws {
@@ -149,6 +149,56 @@ final class SmokeRunner {
         check("duplicate track names stay selectable",app.ui.audio.numberOfItems == 2 && app.ui.audio.selectedTag() == 2)
         app.ui.sync(PlaybackInfo(),nil,backend:"",settings:app.preferences)
     }
+    func checkStartupWindowSize(_ name: String) {
+        guard let app else { return }
+        app.ui.layoutSubtreeIfNeeded()
+        let rendered = app.hub.backend == .native ? app.ui.video.nativeLayer.bounds.size : app.ui.video.compatibilityView.bounds.size
+        check(name,app.ui.videoSize.indexOfSelectedItem == 1 && rendered == NSSize(width:320,height:180),"Rendered: \(rendered)")
+        if let visible = app.window.screen?.visibleFrame { check("\(name) stays on screen",visible.contains(app.window.frame),"\(app.window.frame) in \(visible)") }
+    }
+    func nativeWindowSizing() {
+        guard let app else { return }
+        checkStartupWindowSize("native startup applies original window size")
+        for (index,size) in [(0,NSSize(width:160,height:90)),(2,NSSize(width:640,height:360)),(1,NSSize(width:320,height:180))] {
+            app.ui.videoSize.selectItem(at:index); app.sizeChanged(); app.ui.layoutSubtreeIfNeeded()
+            check("native selected scale \(index)",app.ui.video.nativeLayer.bounds.size == size,"Rendered: \(app.ui.video.nativeLayer.bounds.size); expected: \(size)")
+        }
+        if let visible = app.window.screen?.visibleFrame {
+            for origin in [visible.origin,NSPoint(x:visible.maxX-200,y:visible.maxY-200)] {
+                app.window.setFrameOrigin(origin)
+                app.resizeWindow(forVideoSize:NSSize(width:3840,height:2160))
+                check("large video window stays on screen",visible.contains(app.window.frame),"\(app.window.frame) in \(visible)")
+            }
+            app.sizeChanged()
+        }
+        app.windowWillStartLiveResize(Notification(name:NSWindow.willStartLiveResizeNotification,object:app.window))
+        app.window.setContentSize(NSSize(width:app.ui.bounds.width+80,height:app.ui.bounds.height+40))
+        app.ui.layoutSubtreeIfNeeded()
+        check("manual resizing can enlarge the video",app.ui.video.nativeLayer.bounds.width > 320)
+        let resized = app.window.frame
+        delay(0.6) {
+            self.check("playback polling preserves a manual window resize",app.window.frame == resized)
+            app.sizeChanged(); self.nativeFullscreenSizing()
+        }
+    }
+    func nativeFullscreenSizing() {
+        guard let app else { return }
+        app.window.toggleFullScreen(nil)
+        until("fullscreen entered",condition:{ app.window.styleMask.contains(.fullScreen) }) {
+            self.delay(0.8) {
+                app.ui.layoutSubtreeIfNeeded()
+                self.check("fullscreen enlarges a small video",app.ui.video.nativeLayer.bounds.width > 320)
+                app.window.toggleFullScreen(nil)
+                self.until("fullscreen exited",condition:{ !app.window.styleMask.contains(.fullScreen) }) {
+                    self.delay(0.8) {
+                        app.ui.layoutSubtreeIfNeeded()
+                        self.checkStartupWindowSize("fullscreen exit restores original video size")
+                        self.nativeControls()
+                    }
+                }
+            }
+        }
+    }
     func nativeControls() {
         guard let app else { return }
         check("native dimensions",app.hub.info.size == CGSize(width:320,height:180))
@@ -192,19 +242,38 @@ final class SmokeRunner {
     func matroska() {
         guard let app else { return }
         app.hub.rotation = 0; app.hub.setAspect("")
+        app.window.setContentSize(NSSize(width:1400,height:850))
         app.add([MediaSource(directory.appendingPathComponent("fallback.mkv"))])
         until("unsupported container automatically falls back",condition:{ app.hub.backend == .compatibility && app.hub.info.ready && app.hub.info.size.width == 320 }) {
+            self.checkStartupWindowSize("compatibility startup reapplies original window size")
+            for (index,size) in [(0,NSSize(width:160,height:90)),(2,NSSize(width:640,height:360)),(1,NSSize(width:320,height:180))] {
+                app.ui.videoSize.selectItem(at:index); app.sizeChanged(); app.ui.layoutSubtreeIfNeeded()
+                self.check("compatibility selected scale \(index)",app.ui.video.compatibilityView.bounds.size == size,"Rendered: \(app.ui.video.compatibilityView.bounds.size); expected: \(size)")
+            }
             app.hub.pause(true); app.hub.seek(5)
             self.until("VLC paused seek",condition:{ !app.hub.info.playing && abs(app.hub.info.time-5)<1 }) {
-                app.perform("compact"); self.check("mini player",app.ui.compact && app.window.level == .floating); app.perform("compact")
+                app.perform("compact"); self.check("mini player",app.ui.compact && app.window.level == .floating)
+                app.ui.layoutSubtreeIfNeeded()
+                self.check("mini player enlarges a small video",app.ui.video.compatibilityView.bounds.width > 320)
+                let mini = app.window.frame; app.sizeChanged()
+                self.check("video sizing preserves the mini player window",app.window.frame == mini)
+                app.perform("compact")
+                self.checkStartupWindowSize("mini player exit restores original video size")
                 app.ui.search.stringValue = "native"; app.filter(); self.check("queue filter",app.filtered.count == 1); app.ui.search.stringValue = ""; app.filter()
-                self.audio()
+                app.hub.rotate()
+                self.until("rotated compatibility video ready",condition:{ app.hub.info.ready && app.hub.info.size.width > 0 }) {
+                    app.ui.layoutSubtreeIfNeeded()
+                    self.check("rotated compatibility video keeps original scale",app.ui.video.compatibilityView.bounds.size == NSSize(width:180,height:320),"Reported: \(app.hub.info.size); rendered: \(app.ui.video.compatibilityView.bounds.size)")
+                    app.hub.rotation = 0; self.audio()
+                }
             }
         }
     }
     func audio() {
-        guard let app else { return }; app.add([MediaSource(directory.appendingPathComponent("audio.wav"))])
+        guard let app else { return }; let videoFrame = app.window.frame
+        app.add([MediaSource(directory.appendingPathComponent("audio.wav"))])
         until("native stereo audio clock",condition:{ app.hub.backend == .native && app.hub.info.ready && app.hub.info.time>0.3 && app.hub.info.duration>4 }) {
+            self.check("audio startup preserves the window size",app.window.frame == videoFrame)
             app.preferences.volume=42; app.hub.settings=app.preferences; app.hub.setVolume()
             self.check("native volume and mute",abs(app.hub.player.volume-0.42)<0.01 && app.hub.player.isMuted)
             if let address=ProcessInfo.processInfo.environment["NOIR_HTTP_TEST_URL"],let url=URL(string:address) {

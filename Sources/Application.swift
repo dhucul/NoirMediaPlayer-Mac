@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     var shuffleSeen = Set<UUID>()
     var timer: Timer?, keyMonitor: Any?, settingsPopover: NSPopover?
     var handledEnd = false, bookmarkTick = 0
+    var pendingVideoSize = false
+    var fullscreenTransition = false
+    let normalWindowMinimum = NSSize(width:1080,height:680)
     /// Queue slot of a removed current item, so Next/Previous continue from where it was.
     var vacatedIndex: Int?
     var savedFrame: NSRect?, savedMinimum: NSSize?
@@ -26,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         window = NSWindow(contentRect:NSRect(x:0,y:0,width:1440,height:880),styleMask:[.titled,.closable,.miniaturizable,.resizable,.fullSizeContentView],backing:.buffered,defer:false)
         window.title = "NOIR — Cinema without clutter"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.acceptsMouseMovedEvents = true
-        window.backgroundColor = Palette.ink; window.contentView = ui; window.delegate = self; window.minSize = NSSize(width:1080,height:680); window.isReleasedWhenClosed = false
+        window.backgroundColor = Palette.ink; window.contentView = ui; window.delegate = self; window.minSize = normalWindowMinimum; window.isReleasedWhenClosed = false
         if let screen = NSScreen.main { let frame = screen.visibleFrame; window.setContentSize(NSSize(width:min(1440,frame.width-60),height:min(880,frame.height-60))) }
         window.center(); window.level = preferences.alwaysOnTop ? .floating : .normal
         ui.action = { [weak self] in self?.perform($0) }; ui.video.drop = { [weak self] in self?.open($0) }
@@ -60,6 +63,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         hub.shutdown { NSApp.reply(toApplicationShouldTerminate:true) }; return .terminateLater
     }
     func windowDidResize(_ notification: Notification) { ui.needsLayout = true }
+    func windowWillEnterFullScreen(_ notification: Notification) { fullscreenTransition = true }
+    func windowDidEnterFullScreen(_ notification: Notification) { fullscreenTransition = false }
+    func windowWillExitFullScreen(_ notification: Notification) { fullscreenTransition = true }
+    func windowDidExitFullScreen(_ notification: Notification) { fullscreenTransition = false; ui.video.needsLayout = true }
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard !ui.compact, !fullscreenTransition, !window.styleMask.contains(.fullScreen) else { return }
+        // Dragging the window explicitly chooses a new video size.
+        ui.video.maximumVideoScale = nil; ui.video.needsLayout = true
+    }
     func buildMenu() {
         let main = NSMenu(); NSApp.mainMenu = main
         func menu(_ name: String) -> NSMenu { let item = NSMenuItem(title:name,action:nil,keyEquivalent:""); let sub = NSMenu(title:name); item.submenu = sub; main.addItem(item); return sub }
@@ -249,6 +261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if preferences.shuffle { shuffleSeen.insert(source.id) }
         preferences.recents.removeAll { $0.identity == source.identity }; preferences.recents.insert(source,at:0); preferences.recents = Array(preferences.recents.prefix(30)); preferences.save(); buildMenu()
         let resume = preferences.rememberPosition ? preferences.positions[source.url.absoluteString] ?? 0 : 0
+        pendingVideoSize = !source.disc
+        ui.video.maximumVideoScale = nil
         hub.open(source,settings:preferences,time:resume); filter()
     }
     func next(_ direction: Int,user: Bool) {
@@ -285,6 +299,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
     func updated(_ info: PlaybackInfo) {
         ui.sync(info,active,backend:hub.backend.rawValue,settings:preferences)
+        // Dimensions arrive after opening. Apply the selected size once per video,
+        // so later polling and native-to-VLC handoffs preserve manual resizing.
+        if pendingVideoSize, info.ready, info.size.width > 0, info.size.height > 0, hub.source?.id == current {
+            pendingVideoSize = false; sizeChanged()
+        }
         if info.duration > 0, let index = queue.firstIndex(where: { $0.id == current }), abs(queue[index].duration-info.duration) > 1 { queue[index].duration = info.duration; ui.table.reloadData() }
         bookmarkTick += 1; if bookmarkTick%40 == 0 { bookmark(); preferences.save() }
         // Playback resumed after an end (for example a seek back), so the next end is handled again.
@@ -328,10 +347,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     @objc func subtitleChanged() { hub.selectTrack(ui.subtitles.selectedTag(),subtitle:true) }
     @objc func aspectChanged() { hub.setAspect(ui.aspect.indexOfSelectedItem == 0 ? "" : ui.aspect.titleOfSelectedItem ?? "") }
     @objc func sizeChanged() {
-        guard hub.info.size.width > 0, !window.styleMask.contains(.fullScreen) else { return }
-        let scale = [0.5,1.0,2.0][max(0,ui.videoSize.indexOfSelectedItem)], size = hub.info.size
-        let screen = window.screen?.visibleFrame ?? NSRect(x:0,y:0,width:1440,height:900), extra: CGFloat = (ui.showSidebar ? 246 : 0)+(ui.showInspector ? 280 : 0)+24
-        window.setContentSize(NSSize(width:max(window.minSize.width,min(screen.width-40,size.width*scale+extra)),height:max(window.minSize.height,min(screen.height-40,size.height*scale+240))))
+        guard hub.info.size.width > 0, hub.info.size.height > 0 else { return }
+        let scales: [CGFloat] = [0.5,1,2], index = ui.videoSize.indexOfSelectedItem
+        let scale = scales[scales.indices.contains(index) ? index : 1]
+        ui.video.maximumVideoScale = scale; ui.video.needsLayout = true
+        let size = ui.video.displayVideoSize
+        resizeWindow(forVideoSize:NSSize(width:size.width*scale,height:size.height*scale))
+    }
+    func resizeWindow(forVideoSize size: NSSize) {
+        guard !ui.compact, !window.styleMask.contains(.fullScreen) else { return }
+        let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1440,height:900)
+        let available = visible.insetBy(dx:20,dy:20)
+        let content = ui.contentSize(forVideoSize:size)
+        let requested = window.frameRect(forContentRect:NSRect(origin:.zero,size:content)).size
+        window.minSize = NSSize(width:min(normalWindowMinimum.width,available.width),height:min(normalWindowMinimum.height,available.height))
+        var frame = window.frame
+        let top = frame.maxY
+        frame.size = NSSize(width:max(window.minSize.width,min(available.width,requested.width)),height:max(window.minSize.height,min(available.height,requested.height)))
+        frame.origin.x = min(max(frame.minX,available.minX),available.maxX-frame.width)
+        frame.origin.y = min(max(top-frame.height,available.minY),available.maxY-frame.height)
+        window.setFrame(frame,display:true); ui.needsLayout = true; ui.layoutSubtreeIfNeeded()
     }
     func chooseSubtitle() {
         guard hub.backend != .none else { showNotice("Open media before loading subtitles"); return }
@@ -355,7 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if !ui.compact && window.styleMask.contains(.fullScreen) { showNotice("Exit fullscreen to use the mini player"); return }
         ui.compact.toggle()
         if ui.compact { savedFrame = window.frame; savedMinimum = window.minSize; window.minSize = NSSize(width:480,height:320); window.setContentSize(NSSize(width:640,height:420)); window.level = .floating }
-        else { window.minSize = savedMinimum ?? NSSize(width:1080,height:680); if let savedFrame { window.setFrame(savedFrame,display:true) }; window.level = preferences.alwaysOnTop ? .floating : .normal }
+        else { window.minSize = savedMinimum ?? normalWindowMinimum; if let savedFrame { window.setFrame(savedFrame,display:true) }; window.level = preferences.alwaysOnTop ? .floating : .normal }
         ui.needsLayout = true
     }
     func key(_ event: NSEvent) -> NSEvent? {

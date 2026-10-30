@@ -29,6 +29,15 @@ final class VideoSurface: NSView {
     let empty = Panel(.clear)
     var rotation = 0, aspect = ""
     var videoSize = CGSize(width:16,height:9)
+    var maximumVideoScale: CGFloat?
+    var fitsVideoToBounds = false
+    var displayVideoSize: CGSize {
+        let swapped = rotation % 180 != 0
+        var size = swapped ? CGSize(width:videoSize.height,height:videoSize.width) : videoSize
+        let values = aspect.split(separator:":").compactMap { Double($0) }
+        if values.count == 2, values[0] > 0, values[1] > 0 { size.width = size.height*CGFloat(values[0]/values[1]) }
+        return size
+    }
     var drop: (([URL])->Void)?
     override init(frame: NSRect) {
         super.init(frame:frame); wantsLayer = true; layer?.backgroundColor = NSColor.black.cgColor
@@ -44,13 +53,16 @@ final class VideoSurface: NSView {
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
     override func layout() {
-        super.layout(); compatibilityView.frame = bounds; empty.frame = bounds
+        super.layout(); empty.frame = bounds
         let swapped = rotation % 180 != 0
-        let natural = videoSize.width > 0 && videoSize.height > 0 ? videoSize.width/videoSize.height : 16/9
+        let reference = displayVideoSize
+        guard reference.width > 0, reference.height > 0 else { return }
         let values = aspect.split(separator:":").compactMap { Double($0) }
-        let ratio: CGFloat = values.count == 2 ? CGFloat(values[0]/values[1]) : swapped ? 1/natural : natural
-        var size = CGSize(width:bounds.width,height:bounds.width/ratio)
-        if size.height > bounds.height { size = CGSize(width:bounds.height*ratio,height:bounds.height) }
+        var scale = min(bounds.width/reference.width,bounds.height/reference.height)
+        let capped = !fitsVideoToBounds && window?.styleMask.contains(.fullScreen) != true && maximumVideoScale != nil
+        if capped, let maximumVideoScale { scale = min(scale,maximumVideoScale) }
+        let size = CGSize(width:reference.width*scale,height:reference.height*scale)
+        compatibilityView.frame = capped ? NSRect(x:bounds.midX-size.width/2,y:bounds.midY-size.height/2,width:size.width,height:size.height) : bounds
         CATransaction.begin(); CATransaction.setDisableActions(true)
         nativeLayer.setAffineTransform(.identity)
         nativeLayer.bounds = CGRect(origin:.zero,size:swapped ? CGSize(width:size.height,height:size.width) : size)
@@ -280,6 +292,7 @@ final class PlaybackHub: @unchecked Sendable {
                         if let id = self.pendingAudio ?? match(self.pendingAudioName,in:audio), id == -1 || audio.contains(where: { $0.id == id }) { self.selectTrack(id,subtitle:false); self.pendingAudio=nil; self.pendingAudioName=nil }
                         if let id = self.pendingSubtitle ?? match(self.pendingSubtitleName,in:subtitles), id == -1 || subtitles.contains(where: { $0.id == id }) { self.selectTrack(id,subtitle:true); self.pendingSubtitle=nil; self.pendingSubtitleName=nil }
                     }
+                    if self.info.size.width > 0, self.info.size.height > 0 { self.surface.videoSize = self.info.size; self.surface.needsLayout = true }
                     self.update?(self.info)
                 }
             }
