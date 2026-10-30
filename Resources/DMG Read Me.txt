@@ -1,0 +1,32 @@
+NOIR Media Player for macOS — Apple Silicon preview, build 3
+
+Drag NOIR Media Player into Applications, then open it.
+Requires an Apple Silicon Mac (M1 or later); the deployment target is macOS 13.
+
+Native macOS playback is preferred. VLC is bundled for unsupported formats,
+complex captions, DVD and Blu-ray compatibility. No separate VLC install is needed.
+
+This preview is ad-hoc signed and is not Apple-notarized.
+Physical-disc behavior and older macOS versions still need verification.
+Encrypted Blu-ray needs a compatible arm64 AACS library and suitable keys;
+these are configured through Quick Settings and are not included here.
+
+Open media: Command-O. Open folder: Shift-Command-O.
+Network stream: Command-L. Disc: Command-D. Eject: Command-E.
+Space: play/pause. F: fullscreen. P: mini player. S: snapshot.
+I: inspector. B: queue. Option-arrows/Return: DVD menu navigation.
+
+Source, build scripts, tests and detailed parity notes are in the repository
+below (see README.md). The reports record 82 passing
+playback/behavior checks and 3 runtime packaging checks.
+
+Build 3 keeps audio and position when rotating during compatibility startup,
+resumes playback when seeking after a file ends, keeps seeks made while a file
+opens, makes Play after Stop resume the current item and Next after removing it
+play the following one, keeps tracks that share a name, and preserves settings
+across versions. It also reads Windows-1252 and BOM playlists, fixes caption
+parsing edge cases, keeps caption files dropped with media out of the queue,
+and hardens the VLC adapter against a missing player.
+
+Source: https://github.com/dhucul/NoirMediaPlayer-Mac
+Windows version: https://github.com/dhucul/NoirMediaPlayer

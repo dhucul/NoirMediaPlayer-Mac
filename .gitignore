@@ -1,0 +1,5 @@
+# Built app, VLC runtime cache, SDK module cache and generated test fixtures
+build/
+# Disk images are published as release assets, not committed
+*.dmg
+.DS_Store
